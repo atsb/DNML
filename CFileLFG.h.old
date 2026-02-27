@@ -1,0 +1,84 @@
+// =================================================================================================
+//	CFileLFG.h
+//		DNML for Macintosh Ｌｅａｆ形式ファイル読込み処理クラス定義
+//
+//	Copyright 2001, A.Iisaka
+// =================================================================================================
+
+#ifndef _H_CFileLFG
+#define _H_CFileLFG
+
+#include "CDnmlConst.h"
+#include "CGBuffer.h"
+
+#define LP_KEY_LEN 11
+
+typedef enum {
+	LPTYPE_SIZUWIN,
+	LPTYPE_KIZUWIN,
+	LPTYPE_TOHEART,
+	LPTYPE_SAORIN,
+	LPTYPE_UNKNOWN
+}	LeafPackType;
+
+// -------------------------------------------------------------------------------------------------
+//	･ CLeafPack class
+// -------------------------------------------------------------------------------------------------
+class CLeafPack
+{
+private:
+	LeafPackType	mType;				/* パックの種別         */
+
+	unsigned char	*mAddr;				/* 先頭アドレス         */
+	size_t			mSize;				/* サイズ               */
+	int				mFileNum;			/* パック中のファイル数 */
+	int				mKey[LP_KEY_LEN];	/* 展開用キー           */
+
+    /* ファイル情報 */
+	struct	LeafFileInfo	{
+		char		name[13];			/* ファイル名                     */
+		size_t		pos;				/* ファイルの先頭からのオフセット */
+		size_t		len;				/* ファイルのサイズ               */
+	}	*mFiles;
+public:
+							CLeafPack(char *inPackName);
+							~CLeafPack(void);
+
+	int						findFile(char *inName);
+	unsigned char			*extractFile(int inIndex, size_t *outSize);
+	
+	Boolean					isActive()		{ return (!mAddr) ? false : true; };
+protected:
+	void					guessKey(void);
+	void 					regularizeName(char *inName);
+	void					extractTable(void);
+};
+
+// -------------------------------------------------------------------------------------------------
+//	･ CFileLFG class
+// -------------------------------------------------------------------------------------------------
+class CFileLFG
+{
+private:
+	CGBuffer		*mCGB;
+	int				xsize, ysize;
+	unsigned char	*mFileBuff;
+public:
+							CFileLFG(char* fname, int mode, int r, int g, int b);
+							~CFileLFG(void);
+
+	Boolean					IsActive(void)				{ return (!mCGB) ? false : true; };
+	int						GetSizeX(void)				{ return xsize; };
+	int						GetSizeY(void)				{ return ysize; };
+	unsigned char			*GetBuffer(void)			{ return mCGB->GetBuffer(); };
+	unsigned char			*GetMaskBuffer(void)		{ return mCGB->GetMaskBuffer(); };
+	CGBuffer				*GetCGBuffer(void)			{ return mCGB; }
+	void					SetCGBuffer(CGBuffer *cgb)	{ mCGB = cgb; };
+	
+protected:
+	Boolean					separateFileName(char *fname, char *packName, char *fileName);
+	void					loadLFG(int mode, int r, int g, int b);
+	void					loadLF2(int mode, int r, int g, int b);
+};
+
+#endif	// _H_CFileLFG

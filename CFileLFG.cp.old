@@ -1,0 +1,528 @@
+// =================================================================================================
+//	CFileLFG.cp
+//		DNML for Macintosh Ｌｅａｆ形式ファイル読込み処理
+//
+//	Copyright 2001, A.Iisaka
+// =================================================================================================
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <path2fss.h>
+
+#include "CFileLFG.h"
+
+// =================================================================================================
+//	CLeafPack Class
+// =================================================================================================
+
+// -------------------------------------------------------------------------------------------------
+//	･ CLeafPack										Constructer				[public]
+// -------------------------------------------------------------------------------------------------
+CLeafPack::CLeafPack(
+	char		*inPackName)
+{
+	FSSpec			spec;
+	short			fRefNum;
+	long			count;
+	
+	mType  = LPTYPE_UNKNOWN;
+	mAddr  = nil;
+	mSize  = 0;
+	mFiles = nil;
+	
+	if (__path2fss(inPackName, &spec) != noErr) {
+		return;
+	}
+	if (FSpOpenDF(&spec, fsRdPerm, &fRefNum) != noErr) {
+		return;
+	}
+	GetEOF(fRefNum, &count);
+	mAddr = new unsigned char[count];
+	if (mAddr) {
+		SetFPos(fRefNum, fsFromStart, 0);
+		FSRead(fRefNum, &count, mAddr);
+		mSize = count;
+	}
+	FSClose(fRefNum);
+	if (!mAddr)		return;
+	
+	// マジックコードのチェック
+	if (memcmp(mAddr, "LEAFPACK", 8)) {
+		delete[] mAddr;
+		mAddr = nil;
+		mSize = 0;
+		return;
+	}
+
+	mFileNum = mAddr[8] | mAddr[9]<<8;
+	mFiles   = new LeafFileInfo[mFileNum];
+	if (!mFiles) {
+		delete[] mAddr;
+		mAddr = nil;
+		mSize = 0;
+		return;
+	}
+
+
+    /* check type */
+    if (mFileNum == 0x0248 || mFileNum == 0x03e1) {
+        mType = LPTYPE_TOHEART;
+    } else
+    if (mFileNum == 0x01fb) {
+        mType = LPTYPE_KIZUWIN;
+    } else
+    if (mFileNum == 0x0193) {
+        mType = LPTYPE_SIZUWIN;
+    } else
+    if (mFileNum == 0x0072) {
+        mType = LPTYPE_SAORIN;
+    } else {
+        mType = LPTYPE_UNKNOWN;
+    }
+
+    /* KEY の自動取得 */
+    guessKey();
+
+    /* ファイルテーブルの取得 */
+    extractTable();
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ CLeafPack										Deconstructer			[public]
+// -------------------------------------------------------------------------------------------------
+CLeafPack::~CLeafPack(void)
+{
+	if (mFiles)		delete[] mFiles;
+	if (mAddr)		delete[] mAddr;
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ guessKey																[protected]
+// -------------------------------------------------------------------------------------------------
+void 
+CLeafPack::guessKey(void)
+{
+	/* find the top of table */
+	unsigned char	*p = mAddr + mSize - 24 * mFileNum;
+
+	/* zero */
+	mKey[0] = p[11];
+
+	/* 1st position, (maybe :-)) constant */
+	mKey[1] = (p[12] - 0x0a) & 0xff;
+	mKey[2] = p[13];
+	mKey[3] = p[14];
+	mKey[4] = p[15];
+
+	/* 2nd position, from 1st next position */
+	mKey[5] = (p[38] - p[22] + mKey[0]) & 0xff;
+	mKey[6] = (p[39] - p[23] + mKey[1]) & 0xff;
+
+	/* 3rd position, from 2nd next position */
+	mKey[7] = (p[62] - p[46] + mKey[2]) & 0xff;
+	mKey[8] = (p[63] - p[47] + mKey[3]) & 0xff;
+
+	/* 1st next position, from 2nd position */
+    mKey[9]  = (p[20] - p[36] + mKey[3]) & 0xff;
+    mKey[10] = (p[21] - p[37] + mKey[4]) & 0xff;
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ regularizeName														[protected]
+// -------------------------------------------------------------------------------------------------
+void 
+CLeafPack::regularizeName(
+	char		*inName)
+{
+	char	buf[12];
+	int		i = 0;
+
+	strcpy(buf, inName);
+	while (i < 8 && buf[i] != 0x20) {
+		inName[i] = buf[i];
+		i++;
+	}
+    inName[i++] = '.';
+
+	/* file extention */
+	inName[i++] = buf[8];
+	inName[i++] = buf[9];
+	inName[i++] = buf[10];
+
+	inName[i] = '\0';
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ extractTable															[protected]
+// -------------------------------------------------------------------------------------------------
+void
+CLeafPack::extractTable(void)
+{
+	/* find the top of table */
+	unsigned char	*p = mAddr + mSize - 24 * mFileNum;
+
+	int				i, j;
+	int				k = 0;
+	int				b[4];
+
+	for (i = 0; i < mFileNum; i++) {
+		/* get filename */
+		for (j = 0; j < 12; j++) {
+			mFiles[i].name[j] = (*p++ - mKey[k]) & 0xff;
+			k = (++k) % LP_KEY_LEN;
+		}
+		regularizeName(mFiles[i].name);
+
+		/* a position in the archive file */
+		for (j = 0; j < 4; j++) {
+			b[j] = (*p++ - mKey[k]) & 0xff;
+			k = (++k) % LP_KEY_LEN;
+		}
+		mFiles[i].pos = (b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0];
+
+		/* file length */
+		for (j = 0; j < 4; j++) {
+			b[j] = (*p++ - mKey[k]) & 0xff;
+			k = (++k) % LP_KEY_LEN;
+		}
+		mFiles[i].len = (b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0];
+
+		/* the head of the next file */
+		for (j = 0; j < 4; j++) {
+			b[j] = (*p++ - mKey[k]) & 0xff;
+			k = (++k) % LP_KEY_LEN;
+		}
+	}
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ findFile																[protected]
+// -------------------------------------------------------------------------------------------------
+int
+CLeafPack::findFile(
+	char		*inName)
+{
+	char	*sp, *dp, fname[32];
+	
+	for (sp = inName, dp = fname; *sp != '\0'; sp++, dp++) {
+		if ('a' <= *sp && *sp <= 'z') {
+			*dp = *sp - 'a' + 'A';
+		} else {
+			*dp = *sp;
+		}
+	}
+	*dp = '\0';
+
+	for (int i = 0; i < mFileNum; i++) {
+		if (!strcmp(fname, mFiles[i].name)) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ extractFile															[protected]
+// -------------------------------------------------------------------------------------------------
+unsigned char *
+CLeafPack::extractFile(
+	int			inIndex,
+	size_t		*outSize)
+{
+	int				i;
+	unsigned char	*ret;
+	unsigned char	*p, *q;
+	size_t			size;
+
+    /* 領域確保 */
+	ret = new unsigned char[mFiles[inIndex].len];
+	if (!ret)	return nil;
+
+	size = mFiles[inIndex].len;				/* サイズ */
+	if (outSize) {
+        *outSize = size;
+	}
+
+	p = mAddr + mFiles[inIndex].pos;		/* 転送元 */
+	q = ret;								/* 転送先 */
+
+	/* キーの解除 & copy */
+	for (i = 0; i < size; i++) {
+		int a = *p++;
+		a = (a - mKey[i % LP_KEY_LEN]) & 0xff;
+		*q++ = a;
+	}
+
+	return ret;
+}
+
+
+// =================================================================================================
+//	CFileLFG Class
+// =================================================================================================
+
+// -------------------------------------------------------------------------------------------------
+//	･ CFileLFG										Constructer				[public]
+// -------------------------------------------------------------------------------------------------
+CFileLFG::CFileLFG(
+	char		*fname,
+	int			mode,
+	int			r,
+	int			g,
+	int			b )
+{
+	char		packName[256], fileName[32];
+	CLeafPack	*leafPack = nil;
+	int			index;
+	size_t		size;
+	
+	mCGB      = nil;
+	xsize     = 0;
+	ysize     = 0;
+	mFileBuff = nil;
+
+	/* ファイル名の分離 */
+	if (!separateFileName(fname, packName, fileName)) {
+		goto exit_proc;
+	}
+
+	/* パックファイル・オープン */
+	if ((leafPack = new CLeafPack(packName)) == nil) {
+		return;
+	}
+	if (!leafPack->isActive()) {
+		goto exit_proc;
+	}
+	
+	if ((index = leafPack->findFile("TH_VD23.P16")) == -1) {
+		goto exit_proc;
+	}
+	if ((mFileBuff = leafPack->extractFile(index, &size)) == nil) {
+		goto exit_proc;
+	}
+	delete mFileBuff;
+	
+	/* データのアンパック */
+	if ((index = leafPack->findFile(fileName)) == -1) {
+		goto exit_proc;
+	}
+	if ((mFileBuff = leafPack->extractFile(index, &size)) == nil) {
+		goto exit_proc;
+	}
+	
+	/* イメージ展開 */
+	if (strstr(fileName, ".LFG") != nil) {
+		loadLFG(mode, r, g, b);
+	} else
+	if (strstr(fileName, ".LF2") != nil) {
+		loadLF2(mode, r, g, b);
+	}
+	
+exit_proc:
+	if (leafPack)	delete leafPack;
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ CFileLFG										Deconstructer			[public]
+// -------------------------------------------------------------------------------------------------
+CFileLFG::~CFileLFG(void)
+{
+	if (mFileBuff)		delete[] mFileBuff;
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ separateFileName														[protected]
+// -------------------------------------------------------------------------------------------------
+Boolean
+CFileLFG::separateFileName(
+	char		*fname,
+	char		*packName,
+	char		*fileName)
+{
+	char		*sp, *dp, *lp, pathName[256];
+	
+	for (sp = fname, dp = pathName; *sp != '\0'; sp++, dp++) {
+		if ('a' <= *sp && *sp <= 'z') {
+			*dp = *sp - 'a' + 'A';
+		} else {
+			*dp = *sp;
+		}
+	}
+	*dp = '\0';
+	
+	if ((lp = strstr(pathName, ".PAK")) == nil) {
+		return false;
+	}
+	lp += 4;
+	memcpy(packName, pathName, lp - pathName);
+	packName[lp-pathName] = '\0';
+	strcpy(fileName, lp + 1);
+
+	return true;
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ loadLFG																[protected]
+// -------------------------------------------------------------------------------------------------
+void
+CFileLFG::loadLFG(
+	int			mode,
+	int			r,
+	int			g,
+	int			b)
+{
+}
+
+// -------------------------------------------------------------------------------------------------
+//	･ loadLF2																[protected]
+// -------------------------------------------------------------------------------------------------
+void
+CFileLFG::loadLF2(
+	int			mode,
+	int			r,
+	int			g,
+	int			b)
+{
+	int				width, height, xoffset, yoffset;
+	size_t			size;
+	int				transColor, paletteNum;
+	unsigned char	palette[256][3];
+	
+    /* check magic number 'LEAFCODE' */
+    if (memcmp(mFileBuff, "LEAF256\0", 8)) {
+		return;
+    }
+
+	/* サイズ取得 */
+//	xoffset =  (mFileBuff[9]  << 8) | mFileBuff[8];
+//	yoffset =  (mFileBuff[11] << 8) | mFileBuff[10];
+//	width   = ((mFileBuff[13] << 8) | mFileBuff[12]) + xoffset;
+//	height  = ((mFileBuff[15] << 8) | mFileBuff[14]) + yoffset;
+//	size    = (width - xoffset) * (height - yoffset);
+	xoffset = 0;
+	yoffset = 0;
+	width   = ((mFileBuff[13] << 8) | mFileBuff[12]);
+	height  = ((mFileBuff[15] << 8) | mFileBuff[14]);
+	size    = width * height;
+
+    /* read palette */
+	transColor = mFileBuff[0x12];
+	paletteNum = mFileBuff[0x16];
+    {
+        const unsigned char	*p = mFileBuff + 0x18;
+		for (int i = 0; i < paletteNum; i++) {
+			palette[i][2] = *p++;
+			palette[i][1] = *p++;
+			palette[i][0] = *p++;
+		}
+	}
+
+	/* イメージ領域確保 */
+	if ((mCGB = new CGBuffer(width, height, 3, width*3, true, 0)) == nil) {
+		return;
+	}
+	unsigned char	*dstbuf = mCGB->GetBuffer();
+	unsigned char	*mskbuf = mCGB->GetMaskBuffer();
+	int				dstbpl  = mCGB->GetBPL();
+	int				dstbpp  = mCGB->GetBPP();
+	int				mskbpl  = mCGB->GetSizeX();
+	unsigned char	*dstd, *mskd;
+	
+	/* イメージ展開 */
+	{
+		int		*ring = new int[0x1000];
+		int		i, j, c, m, flag;
+		int		upper, lower, pos, len, d, idx, p;
+		int		rwidth  = width  - xoffset;
+		int		rheight = height - yoffset;
+		int		tr = -1;
+		
+		p = 0x18 + paletteNum * 3;
+
+		/* initialize ring buffer */
+		memset(ring, '\0', 0x1000);
+  
+		/* extract data */
+		for (i = 0, c = 0, m = 0xfee; i < size; ) {
+			/* flag bits, which indicates data or location */
+			if (--c < 0) {
+				flag = mFileBuff[p++];
+				flag ^= 0xff;
+				c = 7;
+			}
+    
+			if (flag & 0x80) {
+				/* data */
+				d = mFileBuff[p++];
+				d ^= 0xff;
+				ring[m++] = d;
+				idx = (i % rwidth) + rwidth * (rheight - i / rwidth - 1);
+
+				dstd = dstbuf + idx * dstbpp;
+				dstd[0] = palette[d][0];
+				dstd[1] = palette[d][1];
+				dstd[2] = palette[d][2];
+				mskd = mskbuf + idx;
+				if (mode == MASK_NONE || mode == MASK_ALPHA) {
+					*mskd = 0xff;
+				} else {
+					if (mode == MASK_AUTO) {
+						if (tr == -1) {
+							tr = d;
+							*mskd = 0x00;
+						} else {
+							*mskd = (d == tr) ? 0x00 : 0xff;
+						}
+					} else {
+						*mskd = (d == transColor) ? 0x00 : 0xff;
+					}
+				}
+				i++;
+				m &= 0xfff;
+			} else {
+				/* copy from ring buffer */
+				upper = mFileBuff[p++];
+				upper ^= 0xff;
+
+				lower = mFileBuff[p++];
+				lower ^= 0xff;
+      
+				len = (upper & 0x0f) + 3;
+				pos = (upper >> 4) + (lower << 4);
+
+				for(j = 0; j < len && i < size; j++) {
+					idx = (i % rwidth) + rwidth * (rheight - i / rwidth - 1);
+					ring[m++] = d = ring[pos++];
+
+					dstd = dstbuf + idx * dstbpp;
+					dstd[0] = palette[d][0];
+					dstd[1] = palette[d][1];
+					dstd[2] = palette[d][2];
+					mskd = mskbuf + idx;
+					if (mode == MASK_NONE || mode == MASK_ALPHA) {
+						*mskd = 0xff;
+					} else {
+						if (mode == MASK_AUTO) {
+							if (tr == -1) {
+								tr = d;
+								*mskd = 0x00;
+							} else {
+								*mskd = (d == tr) ? 0x00 : 0xff;
+							}
+						} else {
+							*mskd = (d == transColor) ? 0x00 : 0xff;
+						}
+					}
+
+					i++;
+					m &= 0xfff;
+					pos &= 0xfff;
+				}
+			}
+			flag = flag << 1;
+		}
+
+		delete[] ring;
+	}
+}
